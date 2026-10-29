@@ -60,7 +60,40 @@ flowchart TB
     Worker -.->|"XACK on COMMIT"| Redis
 ```
 
-## 4. Concurrency Benchmark & Proof of Correctness
+## 4. Request Flow Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant N as NGINX
+    participant A as Fastify API
+    participant R as Redis
+
+    U->>N: Purchase request
+    N->>N: IP rate limit (20 r/s, burst 40)
+    alt Over limit
+        N-->>U: Rejected (rate limited)
+    else Within limit
+        N->>A: Route via least_conn
+        A->>R: EVALSHA purchase.lua
+        activate R
+        Note over R: Atomic Lua execution<br/>1. SISMEMBER buyers → already bought?<br/>2. stock available?<br/>3. DECR stock<br/>4. SADD buyer<br/>5. HSET order:{id} = PENDING<br/>6. XADD stream:orders
+        deactivate R
+        alt Success
+            R-->>A: OK + order id
+            A-->>U: Accepted (order PENDING)
+        else Already purchased
+            R-->>A: DUPLICATE
+            A-->>U: Rejected (one per buyer)
+        else Sold out
+            R-->>A: SOLD_OUT
+            A-->>U: Rejected (sold out)
+        end
+    end
+```
+
+## 5. Concurrency Benchmark & Proof of Correctness
 
 A stress test comparing the baseline naive endpoint versus the production Redis Lua pipeline was executed under identical traffic conditions (initial stock = 500 units):
 
@@ -74,9 +107,9 @@ A stress test comparing the baseline naive endpoint versus the production Redis 
 | **PostgreSQL Write Contention** | Massive lock contention; aborted queries | Constant, backpressure-buffered stream writes | 
 | **Duplicate User Purchases** | Possible under concurrent multi-clicks | Blocked instantly by `SISMEMBER` | 
 
-## 5. Technical Deep Dives (Module 9 Closures)
+## 6. Technical Deep Dives (Module 9 Closures)
 
-### 5.1 Locking Mechanism Comparison Under Contention
+### 6.1 Locking Mechanism Comparison Under Contention
 
 | **Locking Strategy** | **Mechanism** | **Concurrency Behavior** | **Deadlock Risk** | **DB Overhead** | **Oversell Protection** | 
 | **Naive (SELECT** $\rightarrow$ **UPDATE)** | Separate queries; check in Node.js memory | Fails completely under concurrent traffic | None | Low | **Fails (Oversells)** | 
@@ -84,7 +117,7 @@ A stress test comparing the baseline naive endpoint versus the production Redis 
 | **Optimistic (`version` column)** | Checks version on update; rolls back on clash | Causes massive retry storms; 95% fail | Low | Very high during contention | Guaranteed safe | 
 | **Redis Lua + Conditional SQL (Ours)** | Atomic gate in Redis memory; queue to DB | Sub-4ms gate in memory; smooth sequential writes | **Zero** | **Minimal (DB shielded)** | **Guaranteed safe** | 
 
-### 5.2 N+1 Query Elimination & Indexing Strategy
+### 6.2 N+1 Query Elimination & Indexing Strategy
 
 * **Hot Path Zero-Query Guarantee:** The checkout path executes 0 SQL queries during the HTTP transaction.
 
@@ -101,7 +134,7 @@ A stress test comparing the baseline naive endpoint versus the production Redis 
 
 * **Query Verification:** `EXPLAIN ANALYZE SELECT * FROM orders WHERE status = 'CONFIRMED' ORDER BY created_at DESC;` demonstrates an **Index Scan** with execution time under `0.05ms`.
 
-### 5.3 Automated Reservation Expiration & Stock Reclaim
+### 6.3 Automated Reservation Expiration & Stock Reclaim
 
 If an order remains `PENDING` (e.g., unpaid) beyond a specified timeout (default: 10 minutes), the automated maintenance worker:
 
@@ -160,7 +193,7 @@ node scripts/verify.mjs
 
 ```
 
-## 7. Future Enterprise Cloud Architecture (Scaling to 100k+ Req/s)
+## 8. Future Enterprise Cloud Architecture (Scaling to 100k+ Req/s)
 
 To scale beyond a single-node host to hundreds of thousands of concurrent requests across multi-region infrastructure, the following enterprise components should be integrated:
 
@@ -189,25 +222,25 @@ AWS ElastiCache for Redis         Apache Kafka / AWS MSK
 
 ```
 
-### 7.1 AWS WAF & Cloudflare Edge Bot Management
+### 8.1 AWS WAF & Cloudflare Edge Bot Management
 
 * **Edge Static Caching:** Cloudflare/CloudFront caches 100% of the React frontend build (HTML/CSS/JS/images), offloading static asset requests from origin compute servers entirely.
 
 * **Bot Mitigation & Challenge:** AWS WAF / Cloudflare Turnstile blocks automated botnets, credential stuffers, and headless browsers via managed rule groups (AWSManagedRulesCommonRuleSet) and invisible crypto-challenges before traffic reaches the load balancer.
 
-### 7.2 AWS Application Load Balancer (ALB) vs. NGINX
+### 8.2 AWS Application Load Balancer (ALB) vs. NGINX
 
 * **Why Introduce AWS ALB:** When running across multiple virtual machines or dynamic Kubernetes nodes, an ALB provides native AWS Certificate Manager (ACM) SSL offloading, cross-zone load balancing, and health-check-based traffic routing.
 
 * **Layered Ingress:** ALB serves as the external regional entry point, forwarding traffic to internal NGINX Ingress Controllers inside the container cluster for fine-grained path routing and leaky-bucket throttling.
 
-### 7.3 Container Orchestration with Amazon EKS (Kubernetes)
+### 8.3 Container Orchestration with Amazon EKS (Kubernetes)
 
 * **Horizontal Pod Autoscaling (HPA):** API deployment replicas scale dynamically from 3 pods to 50+ pods based on CPU/Memory thresholds.
 
 * **KEDA (Kubernetes Event-driven Autoscaling):** Scales background worker pods based directly on the **Redis Stream queue depth / lag**, ensuring worker capacity expands immediately when reservation volume surges.
 
-### 7.4 Distributed Message Broker: Apache Kafka vs. RabbitMQ
+### 8.4 Distributed Message Broker: Apache Kafka vs. RabbitMQ
 
 * **Why Kafka in Enterprise:** While Redis Streams is lightweight and fast, Apache Kafka (or AWS MSK) is ideal for multi-datacenter enterprise scaling:
 
@@ -217,7 +250,7 @@ AWS ElastiCache for Redis         Apache Kafka / AWS MSK
 
 * **RabbitMQ Role:** Recommended if complex AMQP topic exchanges or per-message acknowledgments and dead-lettering workflows are preferred over append-only partition logs.
 
-### 7.5 Database Tier: Amazon Aurora PostgreSQL & Read Replicas
+### 8.5 Database Tier: Amazon Aurora PostgreSQL & Read Replicas
 
 * **Amazon Aurora Serverless v2:** Replaces single-instance PostgreSQL with an auto-scaling, distributed storage engine across 3 Availability Zones.
 
@@ -225,7 +258,7 @@ AWS ElastiCache for Redis         Apache Kafka / AWS MSK
 
 * **Transactional Outbox & CDC (Change Data Capture):** For guaranteed dual-write consistency between Postgres and external fulfillment systems, Debezium CDC reads transactions directly from the PostgreSQL Write-Ahead Log (WAL) and publishes confirmed orders to Kafka.
 
-## 8. Interview "Claims Honesty" Table
+## 9. Interview "Claims Honesty" Table
 
 | **Architecture Component** | **Status** | **How to Phrase Truthfully in Interviews** | 
 | **In-Memory Lua Gate** | **Built & Tested** | "Implemented an atomic Lua script in Redis 7 that executed linear serializable checks and decrements at \~8,800 req/s on a single machine." | 
