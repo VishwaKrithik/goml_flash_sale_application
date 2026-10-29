@@ -96,25 +96,27 @@ sequenceDiagram
 
 A stress test comparing the baseline naive endpoint versus the production Redis Lua pipeline was executed under identical traffic conditions (initial stock = 500 units):
 
-| **Metric / Scenario** | **Buggy Baseline (/naive-checkout)** | **Fixed System (/checkout)** | 
-| **Initial Stock** | 500 units | 500 units | 
-| **Incoming Load** | 2,000 concurrent requests | 10,000 concurrent requests | 
-| **Concurrency Mechanism** | Application `SELECT` $\rightarrow$ `UPDATE` | Atomic Redis Lua script + Redis Stream | 
-| **Hot Path Latency** | High (DB connection starvation, deadlocks) | Sub-4ms (pure in-memory evaluation) | 
-| **Orders Recorded in DB** | **540 – 580 (OVERSOLD)** | **500 (EXACT INVARIANT)** | 
-| **Final DB Stock Value** | 0 | 0 | 
-| **PostgreSQL Write Contention** | Massive lock contention; aborted queries | Constant, backpressure-buffered stream writes | 
-| **Duplicate User Purchases** | Possible under concurrent multi-clicks | Blocked instantly by `SISMEMBER` | 
+| Metric / Scenario | Buggy Baseline (`/naive-checkout`) | Fixed System (`/checkout`) |
+|---|---|---|
+| **Initial Stock** | 500 units | 500 units |
+| **Incoming Load** | 2,000 concurrent requests | 10,000 concurrent requests |
+| **Concurrency Mechanism** | Application `SELECT` → `UPDATE` | Atomic Redis Lua script + Redis Stream |
+| **Hot Path Latency** | High (DB connection starvation, deadlocks) | Sub-4ms (pure in-memory evaluation) |
+| **Orders Recorded in DB** | **540 – 580 (OVERSOLD)** | **500 (EXACT INVARIANT)** |
+| **Final DB Stock Value** | 0 | 0 |
+| **PostgreSQL Write Contention** | Massive lock contention; aborted queries | Constant, backpressure-buffered stream writes |
+| **Duplicate User Purchases** | Possible under concurrent multi-clicks | Blocked instantly by `SISMEMBER` |
 
 ## 6. Technical Deep Dives (Module 9 Closures)
 
 ### 6.1 Locking Mechanism Comparison Under Contention
 
-| **Locking Strategy** | **Mechanism** | **Concurrency Behavior** | **Deadlock Risk** | **DB Overhead** | **Oversell Protection** | 
-| **Naive (SELECT** $\rightarrow$ **UPDATE)** | Separate queries; check in Node.js memory | Fails completely under concurrent traffic | None | Low | **Fails (Oversells)** | 
-| **Pessimistic (`SELECT ... FOR UPDATE`)** | Holds exclusive row locks for duration of TX | Serializes all transactions; deep DB queues | High | High (connection starvation) | Guaranteed safe | 
-| **Optimistic (`version` column)** | Checks version on update; rolls back on clash | Causes massive retry storms; 95% fail | Low | Very high during contention | Guaranteed safe | 
-| **Redis Lua + Conditional SQL (Ours)** | Atomic gate in Redis memory; queue to DB | Sub-4ms gate in memory; smooth sequential writes | **Zero** | **Minimal (DB shielded)** | **Guaranteed safe** | 
+| Locking Strategy | Mechanism | Concurrency Behavior | Deadlock Risk | DB Overhead | Oversell Protection |
+|---|---|---|---|---|---|
+| **Naive (`SELECT` → `UPDATE`)** | Separate queries; check in Node.js memory | Fails completely under concurrent traffic | None | Low | **Fails (Oversells)** |
+| **Pessimistic (`SELECT ... FOR UPDATE`)** | Holds exclusive row locks for duration of TX | Serializes all transactions; deep DB queues | High | High (connection starvation) | Guaranteed safe |
+| **Optimistic (`version` column)** | Checks version on update; rolls back on clash | Causes massive retry storms; 95% fail | Low | Very high during contention | Guaranteed safe |
+| **Redis Lua + Conditional SQL (Ours)** | Atomic gate in Redis memory; queue to DB | Sub-4ms gate in memory; smooth sequential writes | **Zero** | **Minimal (DB shielded)** | **Guaranteed safe** |
 
 ### 6.2 N+1 Query Elimination & Indexing Strategy
 
