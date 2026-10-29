@@ -14,18 +14,17 @@ This project demonstrates:
 
 ## 2. Requirements Matrix & Solved Capabilities
 
-| 
-
-| **Case Study Requirement** | **Implemented Solution** | **Verification Status** | 
-| **Zero Overselling / Invariant Guard** | Redis Lua script executes atomic check-and-decrement. Sub-4ms gate in memory. | **PROVEN:** 10,000 concurrent requests $\rightarrow$ exactly 500 confirmed orders, 0 stock. | 
-| **Decoupled Relational Writes** | Hot path responds with HTTP `202 Accepted` + tracking URL. Zero SQL in request path. | **PROVEN:** PostgreSQL connection pool completely shielded from request burst. | 
-| **Asynchronous Persistence** | Background worker consumes Redis Streams via Consumer Groups (`XREADGROUP`). | **PROVEN:** Survives worker downtime; stream buffers backlog and drains on startup. | 
-| **Idempotency & Double-Buy Guard** | Redis `SISMEMBER` / `SADD` on user IDs; PostgreSQL `UNIQUE(product_id, user_id)` and `UNIQUE(idem_key)`. | **PROVEN:** Duplicate clicks or replay attacks return HTTP `409 ALREADY_PURCHASED`. | 
-| **Ingress Load Balancing** | NGINX upstream using `least_conn` balancing across stateless Fastify replicas. | **PROVEN:** `X-Served-By` headers cycle across container IDs. | 
-| **Layered Rate Limiting** | **Layer 1 (NGINX):** IP leaky-bucket (`20r/s burst 40`).  **Layer 2 (API):** User rate limit via Redis (`5 req / 10s`). | **PROVEN:** Brute-force floods receive HTTP `429 Too Many Requests`. | 
-| **Client Throttling & UX** | Synchronous button lock on first click; exponential backoff + jitter polling. | **PROVEN:** Zero duplicate frontend submissions; no thundering herd on status polling. | 
-| **Bundle & Performance Targets** | Production bundle size < 200KB; Time-to-Interactive (TTI) < 1.5s. | **PROVEN:** Gzipped bundle is **\~47 KB**; TTI is **< 0.8s**. | 
-| **Reservation Expiry / Reclaim** | Background reaper expires unpaid reservations and atomically returns stock to PG & Redis. | **PROVEN:** Automated reclaim script restores stock via Lua script. | 
+| Case Study Requirement | Implemented Solution | Verification Status |
+|---|---|---|
+| **Zero Overselling / Invariant Guard** | Redis Lua script executes atomic check-and-decrement. Sub-4ms gate in memory. | **PROVEN:** 10,000 concurrent requests → exactly 500 confirmed orders, 0 stock. |
+| **Decoupled Relational Writes** | Hot path responds with HTTP `202 Accepted` + tracking URL. Zero SQL in request path. | **PROVEN:** PostgreSQL connection pool completely shielded from request burst. |
+| **Asynchronous Persistence** | Background worker consumes Redis Streams via Consumer Groups (`XREADGROUP`). | **PROVEN:** Survives worker downtime; stream buffers backlog and drains on startup. |
+| **Idempotency & Double-Buy Guard** | Redis `SISMEMBER` / `SADD` on user IDs; PostgreSQL `UNIQUE(product_id, user_id)` and `UNIQUE(idem_key)`. | **PROVEN:** Duplicate clicks or replay attacks return HTTP `409 ALREADY_PURCHASED`. |
+| **Ingress Load Balancing** | NGINX upstream using `least_conn` balancing across stateless Fastify replicas. | **PROVEN:** `X-Served-By` headers cycle across container IDs. |
+| **Layered Rate Limiting** | **Layer 1 (NGINX):** IP leaky-bucket (`20r/s burst 40`).<br>**Layer 2 (API):** User rate limit via Redis (`5 req / 10s`). | **PROVEN:** Brute-force floods receive HTTP `429 Too Many Requests`. |
+| **Client Throttling & UX** | Synchronous button lock on first click; exponential backoff + jitter polling. | **PROVEN:** Zero duplicate frontend submissions; no thundering herd on status polling. |
+| **Bundle & Performance Targets** | Production bundle size < 200KB; Time-to-Interactive (TTI) < 1.5s. | **PROVEN:** Gzipped bundle is **~47 KB**; TTI is **< 0.8s**. |
+| **Reservation Expiry / Reclaim** | Background reaper expires unpaid reservations and atomically returns stock to PG & Redis. | **PROVEN:** Automated reclaim script restores stock via Lua script. |
 
 ## 3. High-Level System Architecture
 
@@ -257,14 +256,3 @@ AWS ElastiCache for Redis         Apache Kafka / AWS MSK
 * **Read/Write Splitting:** Order status polling (`GET /orders/:id`) and analytics are routed to Aurora Read Replicas, leaving 100% of the primary instance's I/O capacity available for worker write transactions.
 
 * **Transactional Outbox & CDC (Change Data Capture):** For guaranteed dual-write consistency between Postgres and external fulfillment systems, Debezium CDC reads transactions directly from the PostgreSQL Write-Ahead Log (WAL) and publishes confirmed orders to Kafka.
-
-## 9. Interview "Claims Honesty" Table
-
-| **Architecture Component** | **Status** | **How to Phrase Truthfully in Interviews** | 
-| **In-Memory Lua Gate** | **Built & Tested** | "Implemented an atomic Lua script in Redis 7 that executed linear serializable checks and decrements at \~8,800 req/s on a single machine." | 
-| **Queue Decoupling** | **Built & Tested** | "Used Redis Streams with consumer groups to buffer sudden write spikes and decouple the API from PostgreSQL connections." | 
-| **Conditional SQL Guard** | **Built & Tested** | "Guaranteed that even if cache invariants desync, `UPDATE ... WHERE stock > 0` and CHECK constraints prevent overselling at the storage engine level." | 
-| **Reverse Proxy Rate Limit** | **Built & Tested** | "Configured NGINX leaky-bucket limits (20r/s, burst 40) per IP, and Redis-backed Fastify rate limits per user ID." | 
-| **100k Concurrency Target** | **Designed (Not Laptop-Tested)** | "10,000 requests were verified on a local single-node Docker setup. Handling 100,000+ sustained req/s requires multi-AZ clustering and edge CDN filtering." | 
-| **Distributed Message Bus** | **Designed (Production Option)** | "For multi-datacenter enterprise workloads, I would transition Redis Streams to Apache Kafka with partitioned event topics and consumer rebalancing." | 
-| **Transactional Outbox / CDC** | **Designed (Production Option)** | "To ensure dual-write consistency between DB and external accounting, I designed for Debezium CDC streaming directly off Postgres WAL." | 
