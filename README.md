@@ -29,51 +29,35 @@ This project demonstrates:
 
 ## 3. High-Level System Architecture
 
-```
-                       [ Incoming User Traffic ]
-                                   │
-                                   ▼
-                   ┌───────────────────────────────┐
-                   │    NGINX Reverse Proxy / LB   │
-                   │  - Least-connection balancing │
-                   │  - IP Rate Limit (20r/s, b40) │
-                   └───────────────┬───────────────┘
-                                   │
-             ┌─────────────────────┼─────────────────────┐
-             ▼                     ▼                     ▼
-     ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
-     │ Fastify API 1 │     │ Fastify API 2 │     │ Fastify API 3 │
-     │  (Stateless)  │     │  (Stateless)  │     │  (Stateless)  │
-     └───────┬───────┘     └───────┬───────┘     └───────┬───────┘
-             │                     │                     │
-             └─────────────────────┼─────────────────────┘
-                                   │ (EVALSHA / In-Memory Only)
-                                   ▼
-                   ┌───────────────────────────────┐
-                   │        Redis 7 Storage        │
-                   │  - Lua: SISMEMBER -> DECR     │
-                   │  - Set: buyers:phone-1        │
-                   │  - Hash: order:{id} (PENDING) │
-                   │  - Stream: stream:orders      │
-                   └───────────────┬───────────────┘
-                                   │
-                                   │ (XREADGROUP / Persistent Queue)
-                                   ▼
-                   ┌───────────────────────────────┐
-                   │   Background Worker Service   │
-                   │  - Safe consumer group read   │
-                   │  - Conditional SQL execution  │
-                   │  - XACK upon COMMIT           │
-                   └───────────────┬───────────────┘
-                                   │
-                                   ▼
-                   ┌───────────────────────────────┐
-                   │     PostgreSQL 16 Database    │
-                   │  - UPDATE stock > 0           │
-                   │  - INSERT order               │
-                   │  - CHECK (stock >= 0)         │
-                   └───────────────────────────────┘
+```mermaid
+flowchart TB
+    Users(["Incoming User Traffic"])
 
+    subgraph Edge["Edge Layer"]
+        Nginx["NGINX Reverse Proxy / Load Balancer<br/>• least_conn balancing<br/>• IP rate limit: 20 r/s, burst 40"]
+    end
+
+    subgraph API["Stateless API Tier (Fastify)"]
+        API1["Fastify API 1"]
+        API2["Fastify API 2"]
+        API3["Fastify API 3"]
+    end
+
+    subgraph Hot["Hot Path: In-Memory Decision"]
+        Redis[("Redis 7<br/>• Lua script: SISMEMBER → DECR<br/>• Set: buyers:phone-1<br/>• Hash: order:{id} (PENDING)<br/>• Stream: stream:orders")]
+    end
+
+    subgraph Cold["Cold Path: Durable Persistence"]
+        Worker["Background Worker<br/>• XREADGROUP (consumer group)<br/>• Conditional SQL execution<br/>• XACK after COMMIT"]
+        PG[("PostgreSQL 16<br/>• UPDATE ... WHERE stock > 0<br/>• INSERT order<br/>• CHECK (stock >= 0)")]
+    end
+
+    Users --> Nginx
+    Nginx --> API1 & API2 & API3
+    API1 & API2 & API3 -->|"EVALSHA (atomic)"| Redis
+    Redis -->|"XREADGROUP (persistent queue)"| Worker
+    Worker -->|"transaction"| PG
+    Worker -.->|"XACK on COMMIT"| Redis
 ```
 
 ## 4. Concurrency Benchmark & Proof of Correctness
